@@ -6,10 +6,14 @@ import numpy as np
 import cv2
 import tempfile
 import os
+import streamlit as st
+from pathlib import Path
 import torch
+import torch.nn as nn
+from torchvision import models
 from PIL import Image
 import torch.nn.functional as F
-import tensorflow as tf
+import tensorflow as tf # type: ignore
 import pydicom
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Image as RLImage, Spacer
 from reportlab.lib.styles import getSampleStyleSheet
@@ -34,18 +38,50 @@ TAGLINE = "AI-powered early insight from chest X-rays"
 # =========================
 # Load Logo
 # =========================
-LOGO_PATH = "/mnt/data/f6bfc212-17b3-4f10-add6-2d78b689455d.jpg"
+# Get the path to the current file's directory
+BASE_DIR = Path(__file__).resolve().parent
+
+# Define the path to the logo
+LOGO_PATH = str(BASE_DIR / "assets" / "Logo.jpg")
+
+print(LOGO_PATH)
+
+# =========================
+#Rebuild the model architecture
+# =========================
+
+class CancerClassifier(nn.Module):
+    def __init__(self, num_classes=2, dropout_rate=0.5):
+        super().__init__()
+        self.base_model = models.densenet121(weights=None)
+
+        num_features = self.base_model.classifier.in_features
+        self.base_model.classifier = nn.Sequential(
+            nn.Dropout(dropout_rate),
+            nn.Linear(num_features, num_classes)
+        )
+
+    def forward(self, x):
+        return self.base_model(x)
 
 # =========================
 # Load Model
 # =========================
 @st.cache_resource
 def load_trained_model():
-    model = torch.load(best_model_fine-tuning.pth, map_location="cpu") #figure out how to write paths
+    model = CancerClassifier(num_classes=2)
+
+    model_path = Path(__file__).parent / "best_model_fine_tuning.pth"
+    checkpoint = torch.load(model_path, map_location="cpu")
+
+    model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
+
     return model
 
-model = load_trained_model() 
+model = load_trained_model()
+st.success("Model loaded successfully!")
+
 
 # =========================
 # Import preprocessing
@@ -94,53 +130,21 @@ def prepare_image(img):
     return img
 
 
+import torch.nn.functional as F
+
 def predict(img_tensor):
     with torch.no_grad():
-        output = model(img_tensor)
-        prob = torch.sigmoid(output).item()
+        outputs = model(img_tensor)          # shape: [1, 2]
+        probs = F.softmax(outputs, dim=1)    # convert logits → probabilities
 
-    label = "Cancer" if prob >= 0.5 else "Normal"
-    confidence = prob if label == "Cancer" else 1 - prob
-    return label, confidence
+        cancer_prob = probs[0][1].item()     # class index 1 = Cancer
+        normal_prob = probs[0][0].item()
 
+    if cancer_prob >= 0.5:
+        return "Cancer", cancer_prob
+    else:
+        return "Normal", normal_prob
 
-"""
-# =========================
-# Grad-CAM
-# =========================
-
-def generate_gradcam(model, img_array, layer_name=None):
-    if layer_name is None:
-        layer_name = [l.name for l in model.layers if 'conv' in l.name][-1]
-
-    grad_model = tf.keras.models.Model(
-        [model.inputs],
-        [model.get_layer(layer_name).output, model.output]
-    )
-
-    with tf.GradientTape() as tape:
-        conv_outputs, predictions = grad_model(img_array)
-        loss = predictions[:, 0]
-
-    grads = tape.gradient(loss, conv_outputs)
-    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
-
-    conv_outputs = conv_outputs[0]
-    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
-    heatmap = tf.squeeze(heatmap)
-    heatmap = np.maximum(heatmap, 0) / np.max(heatmap)
-
-    heatmap = cv2.resize(heatmap, IMG_SIZE)
-    return heatmap
-
-
-def overlay_heatmap(img, heatmap):
-    heatmap = np.uint8(255 * heatmap)
-    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-    overlay = cv2.addWeighted(img, 0.6, heatmap, 0.4, 0)
-    return overlay
-
-"""
 
 # =========================
 # PDF Report
@@ -217,10 +221,10 @@ if uploaded_file:
 
     if label == "Cancer":
         st.error("You should see a doctor for confirmation.")
-        heatmap = generate_gradcam(model, img_tensor)
-        overlay = overlay_heatmap(cv2.resize(image, IMG_SIZE), heatmap)
-        st.subheader("Grad-CAM Heatmap")
-        st.image(overlay, use_container_width=True)
+        #heatmap = generate_gradcam(model, img_tensor)
+        #overlay = overlay_heatmap(cv2.resize(image, IMG_SIZE), heatmap)
+        #st.subheader("Grad-CAM Heatmap")
+        #st.image(overlay, use_container_width=True)
     else:
         st.success("You don’t need to worry based on this scan.")
         heatmap = None
